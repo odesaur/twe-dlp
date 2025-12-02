@@ -1,5 +1,3 @@
-![flowerr](./flowerr.png) 
-
 A CLI tool that archives every twitch emote from a channel.
 
 ### Disclaimer
