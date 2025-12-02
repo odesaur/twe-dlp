@@ -1,14 +1,12 @@
 ![flowerr](./flowerr.png) 
 
-`A CLI tool that downloads every Twitch emote from a channel.`
+A CLI tool that archives every twitch emote from a channel.
 
 ### Disclaimer
 Emote and badge images are property of Twitch Interactive or their respective owners. 
 Do not reuse without obtaining their permission.
 
 ### Usage
-Run with no arguments (interactive prompt):
-
 ![demo](./demo.gif) 
 
 Non Interactive:
@@ -16,7 +14,6 @@ Non Interactive:
 ```bash
 ./twe-dlp <username>|<userid>
 ```
-
 
 ### Installation
 
