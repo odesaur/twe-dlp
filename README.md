@@ -1,5 +1,5 @@
 ### Disclaimer
-Emote and badge images are property of Twitch Interactive or their respective owners. 
+Emote and badge images are property of Twitch Interactive or their respective owners.<br>
 Do not reuse without obtaining their permission.
 
 ### Usage
