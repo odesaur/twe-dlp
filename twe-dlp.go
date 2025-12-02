@@ -14,25 +14,51 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
-	twitchemotesBaseURL = "https://twitchemotes.com"
+	twitchemotesBaseURL  = "https://twitchemotes.com"
+	defaultUserAgent     = "Mozilla/5.0 (X11; Linux x86_64) twe-dlp/1.0"
+	httpRequestTimeout   = 30 * time.Second
+	logBufferMaxMessages = 200
 )
 
 var (
-	emoteSizeList      = []string{"1.0", "2.0", "3.0"}
-	channelURLPattern  = regexp.MustCompile(`/channels/(\d+)`)
-	htmlTagPattern     = regexp.MustCompile(`<.*?>`)
-	safeNamePattern    = regexp.MustCompile(`[^A-Za-z0-9_]+`)
-	defaultUserAgent   = "Mozilla/5.0 (X11; Linux x86_64) twe-dlp/1.0"
-	httpRequestTimeout = 30 * time.Second
+	emoteSizeList     = []string{"1.0", "2.0", "3.0"}
+	channelURLPattern = regexp.MustCompile(`/channels/(\d+)`)
+	htmlTagPattern    = regexp.MustCompile(`<.*?>`)
+	safeNamePattern   = regexp.MustCompile(`[^A-Za-z0-9_]+`)
 )
 
 type EmoteData struct {
 	BaseURL    string
 	FormatType string
 	EmoteCode  string
+}
+
+type downloadResultMessage struct {
+	Error    error
+	LogLines []string
+}
+
+type model struct {
+	textInput         textinput.Model
+	logLines          []string
+	downloading       bool
+	downloadError     error
+	httpClient        *http.Client
+	showHelp          bool
+	styleTitle        lipgloss.Style
+	styleLogPlain     lipgloss.Style
+	styleLogOK        lipgloss.Style
+	styleLogSkip      lipgloss.Style
+	styleLogError     lipgloss.Style
+	styleHelpBoxTitle lipgloss.Style
+	styleHelpBoxBody  lipgloss.Style
+	styleFooter       lipgloss.Style
 }
 
 func createHTTPClient() *http.Client {
@@ -261,7 +287,7 @@ func determineFileExtension(contentType string) string {
 	return "img"
 }
 
-func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteData EmoteData, outputRoot string) {
+func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteData EmoteData, outputRoot string, logFunc func(string)) {
 	emoteCode := emoteData.EmoteCode
 	emoteBaseURL := emoteData.BaseURL
 
@@ -269,7 +295,7 @@ func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteD
 	emoteFolder := filepath.Join(outputRoot, safeEmoteCode)
 	err := os.MkdirAll(emoteFolder, 0o755)
 	if err != nil {
-		fmt.Printf("[error] cannot create folder %s: %v\n", emoteFolder, err)
+		logFunc(fmt.Sprintf("[error] cannot create folder %s: %v", emoteFolder, err))
 		return
 	}
 
@@ -278,19 +304,19 @@ func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteD
 
 		request, err := http.NewRequest("GET", imageURL, nil)
 		if err != nil {
-			fmt.Printf("[skip] %s (%v)\n", imageURL, err)
+			logFunc(fmt.Sprintf("[skip] %s (%v)", imageURL, err))
 			continue
 		}
 		request.Header.Set("User-Agent", defaultUserAgent)
 
 		response, err := httpClient.Do(request)
 		if err != nil {
-			fmt.Printf("[skip] %s (%v)\n", imageURL, err)
+			logFunc(fmt.Sprintf("[skip] %s (%v)", imageURL, err))
 			continue
 		}
 
 		if response.StatusCode != http.StatusOK {
-			fmt.Printf("[skip] %s (status %s)\n", imageURL, response.Status)
+			logFunc(fmt.Sprintf("[skip] %s (status %s)", imageURL, response.Status))
 			response.Body.Close()
 			continue
 		}
@@ -302,7 +328,7 @@ func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteD
 
 		outputFile, err := os.Create(outputPath)
 		if err != nil {
-			fmt.Printf("[skip] %s (cannot create file: %v)\n", outputPath, err)
+			logFunc(fmt.Sprintf("[skip] %s (cannot create file: %v)", outputPath, err))
 			response.Body.Close()
 			continue
 		}
@@ -312,15 +338,15 @@ func downloadEmoteImages(httpClient *http.Client, emoteIdentifier string, emoteD
 		response.Body.Close()
 
 		if copyError != nil {
-			fmt.Printf("[skip] %s (copy error: %v)\n", outputPath, copyError)
+			logFunc(fmt.Sprintf("[skip] %s (copy error: %v)", outputPath, copyError))
 			continue
 		}
 
-		fmt.Printf("[ok] %s\n", outputFilename)
+		logFunc(fmt.Sprintf("[ok] %s", outputFilename))
 	}
 }
 
-func downloadChannelEmotes(httpClient *http.Client, channelID string) error {
+func downloadChannelEmotes(httpClient *http.Client, channelID string, logFunc func(string)) error {
 	channelURL := fmt.Sprintf("%s/channels/%s", twitchemotesBaseURL, channelID)
 
 	document, response, err := fetchDocument(httpClient, channelURL)
@@ -345,58 +371,282 @@ func downloadChannelEmotes(httpClient *http.Client, channelID string) error {
 		return fmt.Errorf("cannot create output directory %s: %w", outputRoot, err)
 	}
 
-	fmt.Printf("Channel ID: %s\n", channelID)
+	logFunc(fmt.Sprintf("Channel ID: %s", channelID))
 	if channelDisplayName != "" {
-		fmt.Printf("Channel Name: %s\n", channelDisplayName)
+		logFunc(fmt.Sprintf("Channel Name: %s", channelDisplayName))
 	}
-	fmt.Printf("Output Folder: %s\n", outputRoot)
-	fmt.Println("Collecting emote metadata...")
+	logFunc(fmt.Sprintf("Output Folder: %s", outputRoot))
+	logFunc("Collecting emote metadata...")
 
 	emoteMap := collectEmoteMetadata(document)
-	fmt.Printf("Found %d emotes\n", len(emoteMap))
+	logFunc(fmt.Sprintf("Found %d emotes", len(emoteMap)))
 
 	if len(emoteMap) == 0 {
 		return nil
 	}
 
 	for emoteIdentifier, emoteData := range emoteMap {
-		fmt.Printf("Downloading sizes for emote: %s (%s)\n", emoteData.EmoteCode, emoteIdentifier)
-		downloadEmoteImages(httpClient, emoteIdentifier, emoteData, outputRoot)
+		logFunc(fmt.Sprintf("Downloading sizes for emote: %s (%s)", emoteData.EmoteCode, emoteIdentifier))
+		downloadEmoteImages(httpClient, emoteIdentifier, emoteData, outputRoot, logFunc)
 	}
 
 	return nil
 }
 
-func main() {
-	var channelIdentifier string
+func newModel(httpClient *http.Client) model {
+	input := textinput.New()
+	input.Placeholder = ""
+	input.Focus()
+	input.Prompt = "> "
+	input.CharLimit = 128
 
-	if len(os.Args) >= 2 {
-		channelIdentifier = strings.TrimSpace(os.Args[1])
-	} else {
-		line, err := readStdinLine("Enter Twitch channel name or numeric ID: ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-			os.Exit(1)
+	title := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#11111b")).
+		Background(lipgloss.Color("#f5c2e7")).
+		Bold(true).
+		Padding(0, 1)
+
+	logPlain := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#cdd6f4"))
+
+	logOK := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#a6e3a1"))
+
+	logSkip := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f9e2af"))
+
+	logError := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f38ba8"))
+
+	helpTitle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f5c2e7")).
+		Bold(true)
+
+	helpBody := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#cdd6f4"))
+
+	footer := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#585b70")).
+		PaddingTop(1)
+
+	return model{
+		textInput:         input,
+		logLines:          []string{},
+		httpClient:        httpClient,
+		showHelp:          false,
+		styleTitle:        title,
+		styleLogPlain:     logPlain,
+		styleLogOK:        logOK,
+		styleLogSkip:      logSkip,
+		styleLogError:     logError,
+		styleHelpBoxTitle: helpTitle,
+		styleHelpBoxBody:  helpBody,
+		styleFooter:       footer,
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m model) hasExactLogLine(line string) bool {
+	for _, existing := range m.logLines {
+		if existing == line {
+			return true
 		}
-		channelIdentifier = line
+	}
+	return false
+}
+
+func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := message.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyEsc:
+			return m, tea.Quit
+		default:
+		}
+
+		if msg.String() == "q" {
+			return m, tea.Quit
+		}
+
+		if msg.String() == "?" {
+			m.showHelp = !m.showHelp
+			return m, nil
+		}
+
+		if msg.Type == tea.KeyEnter {
+			if m.downloading {
+				return m, nil
+			}
+
+			channelIdentifier := strings.TrimSpace(m.textInput.Value())
+			if channelIdentifier == "" {
+				warningText := "Please enter a Twitch channel name or ID."
+				if !m.hasExactLogLine(warningText) {
+					m.appendLogLine(warningText)
+				}
+				return m, nil
+			}
+
+			m.downloading = true
+			m.downloadError = nil
+			m.appendLogLine(fmt.Sprintf("Resolving channel %q...", channelIdentifier))
+
+			return m, func() tea.Msg {
+				collectedLogs := make([]string, 0, 64)
+				logFunc := func(line string) {
+					collectedLogs = append(collectedLogs, line)
+				}
+
+				channelID, err := resolveChannelIdentifierToID(m.httpClient, channelIdentifier)
+				if err != nil {
+					logFunc(fmt.Sprintf("Error resolving channel: %v", err))
+					return downloadResultMessage{
+						Error:    err,
+						LogLines: collectedLogs,
+					}
+				}
+
+				err = downloadChannelEmotes(m.httpClient, channelID, logFunc)
+
+				return downloadResultMessage{
+					Error:    err,
+					LogLines: collectedLogs,
+				}
+			}
+		}
+
+		if !m.downloading {
+			var cmd tea.Cmd
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case downloadResultMessage:
+		for _, line := range msg.LogLines {
+			m.appendLogLine(line)
+		}
+		if msg.Error != nil {
+			m.appendLogLine(fmt.Sprintf("Error: %v", msg.Error))
+			m.downloadError = msg.Error
+		} else {
+			m.appendLogLine("Download completed.")
+		}
+		m.downloading = false
+		m.textInput.SetValue("")
+		m.textInput.Focus()
+		return m, nil
+
+	default:
+		if !m.downloading {
+			var cmd tea.Cmd
+			m.textInput, cmd = m.textInput.Update(message)
+			return m, cmd
+		}
 	}
 
-	if channelIdentifier == "" {
-		fmt.Fprintln(os.Stderr, "No channel identifier provided.")
-		os.Exit(1)
+	return m, nil
+}
+
+func (m *model) appendLogLine(line string) {
+	if line == "" {
+		return
+	}
+	m.logLines = append(m.logLines, line)
+	if len(m.logLines) > logBufferMaxMessages {
+		m.logLines = m.logLines[len(m.logLines)-logBufferMaxMessages:]
+	}
+}
+
+func (m model) renderHelpBox() string {
+	var builder strings.Builder
+
+	builder.WriteString(m.styleHelpBoxTitle.Render("Usage"))
+	builder.WriteString("\n")
+	builder.WriteString(m.styleHelpBoxBody.Render("  tw-dlp <channel|id>"))
+
+	return builder.String()
+}
+
+func (m model) View() string {
+	var builder strings.Builder
+
+	builder.WriteString(m.styleTitle.Render(" tw-dlp "))
+	builder.WriteString("\n\n")
+
+	if m.showHelp {
+		builder.WriteString(m.renderHelpBox())
+		builder.WriteString("\n\n")
 	}
 
-	httpClient := createHTTPClient()
+	if len(m.logLines) > 0 {
+		for _, line := range m.logLines {
+			var styledLine string
+			switch {
+			case strings.HasPrefix(line, "[ok]"):
+				styledLine = m.styleLogOK.Render(line)
+			case strings.HasPrefix(line, "[skip]"):
+				styledLine = m.styleLogSkip.Render(line)
+			case strings.HasPrefix(line, "[error]"), strings.HasPrefix(line, "Error:"):
+				styledLine = m.styleLogError.Render(line)
+			default:
+				styledLine = m.styleLogPlain.Render(line)
+			}
+			builder.WriteString("  ")
+			builder.WriteString(styledLine)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
 
+	builder.WriteString(m.textInput.View())
+	builder.WriteString("\n")
+
+	footerText := "Esc/q: quit • ? more"
+	builder.WriteString(m.styleFooter.Render(footerText))
+	builder.WriteString("\n")
+
+	return builder.String()
+}
+
+func runTextMode(httpClient *http.Client, channelIdentifier string) int {
 	channelID, err := resolveChannelIdentifierToID(httpClient, channelIdentifier)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving channel: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
-	err = downloadChannelEmotes(httpClient, channelID)
+	logFunc := func(line string) {
+		fmt.Println(line)
+	}
+
+	err = downloadChannelEmotes(httpClient, channelID, logFunc)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error downloading emotes: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	httpClient := createHTTPClient()
+
+	if len(os.Args) >= 2 {
+		channelIdentifier := strings.TrimSpace(os.Args[1])
+		if channelIdentifier == "" {
+			fmt.Fprintln(os.Stderr, "No channel identifier provided.")
+			os.Exit(1)
+		}
+		exitCode := runTextMode(httpClient, channelIdentifier)
+		os.Exit(exitCode)
+	}
+
+	initialModel := newModel(httpClient)
+	if _, err := tea.NewProgram(initialModel).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
 }
